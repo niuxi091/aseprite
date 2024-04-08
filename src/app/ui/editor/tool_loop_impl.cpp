@@ -1,5 +1,5 @@
 // Aseprite
-// Copyright (C) 2019-2022  Igara Studio S.A.
+// Copyright (C) 2019-2024  Igara Studio S.A.
 // Copyright (C) 2001-2018  David Capello
 //
 // This program is distributed under the terms of
@@ -452,8 +452,8 @@ protected:
 //////////////////////////////////////////////////////////////////////
 // For drawing
 
-class ToolLoopImpl : public ToolLoopBase,
-                     public EditorObserver {
+class ToolLoopImpl final : public ToolLoopBase,
+                           public EditorObserver {
   Context* m_context;
   bool m_filled;
   bool m_previewFilled;
@@ -477,7 +477,9 @@ public:
                const bool saveLastPoint)
     : ToolLoopBase(editor, site, grid, params)
     , m_context(context)
-    , m_tx(m_context,
+    , m_tx(Tx::DontLockDoc,
+           m_context,
+           m_context->activeDocument(),
            m_tool->getText().c_str(),
            ((m_ink->isSelection() ||
              m_ink->isEyedropper() ||
@@ -515,6 +517,9 @@ public:
       }
     }
 
+    // 'isSelectionPreview = true' if the intention is to show a preview
+    // of Selection tools or Slice tool.
+    const bool isSelectionPreview = m_ink->isSelection() || m_ink->isSlice();
     m_expandCelCanvas.reset(new ExpandCelCanvas(
       site, m_layer,
       m_docPref.tiled.mode(),
@@ -528,10 +533,10 @@ public:
         (m_layer->isTilemap() &&
          site.tilemapMode() == TilemapMode::Pixels &&
          site.tilesetMode() == TilesetMode::Manual &&
-         !m_ink->isSelection() ? ExpandCelCanvas::TilesetPreview:
-                                 ExpandCelCanvas::None) |
-        (m_ink->isSelection() ? ExpandCelCanvas::SelectionPreview:
-                                ExpandCelCanvas::None))));
+         !isSelectionPreview ? ExpandCelCanvas::TilesetPreview:
+                               ExpandCelCanvas::None) |
+        (isSelectionPreview ? ExpandCelCanvas::SelectionPreview:
+                              ExpandCelCanvas::None))));
 
     if (!m_floodfillSrcImage)
       m_floodfillSrcImage = const_cast<Image*>(getSrcImage());
@@ -553,7 +558,7 @@ public:
     m_sprayWidth = m_toolPref.spray.width();
     m_spraySpeed = m_toolPref.spray.speed();
 
-    if (m_ink->isSelection()) {
+    if (isSelectionPreview) {
       m_useMask = false;
     }
     else {
@@ -561,7 +566,7 @@ public:
     }
 
     // Start with an empty mask if the user is selecting with "default selection mode"
-    if (m_ink->isSelection() &&
+    if (isSelectionPreview &&
         (!m_document->isMaskVisible() ||
          (int(getModifiers()) & int(tools::ToolLoopModifiers::kReplaceSelection)))) {
       Mask emptyMask;
@@ -590,6 +595,9 @@ public:
       m_editor->remove_observer(this);
 #endif
 
+    // getSrcImage() is a virtual member function but ToolLoopImpl is
+    // marked as final to avoid not calling a derived version from
+    // this destructor.
     if (m_floodfillSrcImage != getSrcImage())
       delete m_floodfillSrcImage;
   }
@@ -783,6 +791,13 @@ tools::ToolLoop* create_tool_loop(
   Site site = editor->getSite();
   doc::Grid grid = site.grid();
 
+  // If the document is read-only.
+  if (site.document()->isReadOnly()) {
+    StatusBar::instance()->showTip(
+      3000, Strings::statusbar_tips_cannot_modify_readonly_sprite());
+    return nullptr;
+  }
+
   ToolLoopParams params;
   params.tool = editor->getCurrentEditorTool();
   params.ink = editor->getCurrentEditorInk();
@@ -822,11 +837,15 @@ tools::ToolLoop* create_tool_loop(
       return nullptr;
     }
     else if (!layer->isVisibleHierarchy()) {
-      StatusBar::instance()->showTip(
-        1000,
-        fmt::format(Strings::statusbar_tips_layer_x_is_hidden(),
-                    layer->name()));
-      return nullptr;
+      auto& toolPref = Preferences::instance().tool(params.tool);
+      if (toolPref.floodfill.referTo() ==
+          app::gen::FillReferTo::ACTIVE_LAYER) {
+        StatusBar::instance()->showTip(
+          1000,
+          fmt::format(Strings::statusbar_tips_layer_x_is_hidden(),
+                      layer->name()));
+        return nullptr;
+      }
     }
     // If the active layer is read-only.
     else if (layer_is_locked(editor)) {
@@ -845,8 +864,8 @@ tools::ToolLoop* create_tool_loop(
   // Get fg/bg colors
   ColorBar* colorbar = ColorBar::instance();
   if (site.tilemapMode() == TilemapMode::Tiles) {
-    params.fg = app::Color::fromIndex(colorbar->getFgTile()); // TODO Color::fromTileIndex?
-    params.bg = app::Color::fromIndex(colorbar->getBgTile());
+    params.fg = app::Color::fromTile(colorbar->getFgTile());
+    params.bg = app::Color::fromTile(colorbar->getBgTile());
   }
   else {
     params.fg = colorbar->getFgColor();
@@ -941,7 +960,7 @@ tools::ToolLoop* create_tool_loop_for_script(
 
 #ifdef ENABLE_UI
 
-class PreviewToolLoopImpl : public ToolLoopBase {
+class PreviewToolLoopImpl final : public ToolLoopBase {
   Image* m_image;
 
 public:
@@ -962,9 +981,14 @@ public:
         tools::WellKnownPointShapes::Brush);
     }
     else if (m_pointShape->isFloodFill()) {
-      m_pointShape = App::instance()->toolBox()->getPointShapeById
-        (m_tilesMode ? tools::WellKnownPointShapes::Tile:
-                       tools::WellKnownPointShapes::Pixel);
+      const char* id;
+      if (m_tilesMode)
+        id = tools::WellKnownPointShapes::Tile;
+      else if (m_brush->type() == BrushType::kImageBrushType)
+        id = tools::WellKnownPointShapes::Brush;
+      else
+        id = tools::WellKnownPointShapes::Pixel;
+      m_pointShape = App::instance()->toolBox()->getPointShapeById(id);
     }
   }
 
@@ -1035,8 +1059,8 @@ tools::ToolLoop* create_tool_loop_preview(
   // Get fg/bg colors
   ColorBar* colorbar = ColorBar::instance();
   if (site.tilemapMode() == TilemapMode::Tiles) {
-    params.fg = app::Color::fromIndex(colorbar->getFgTile()); // TODO Color::fromTileIndex?
-    params.bg = app::Color::fromIndex(colorbar->getBgTile());
+    params.fg = app::Color::fromTile(colorbar->getFgTile());
+    params.bg = app::Color::fromTile(colorbar->getBgTile());
   }
   else {
     params.fg = colorbar->getFgColor();

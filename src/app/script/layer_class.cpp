@@ -1,5 +1,5 @@
 // Aseprite
-// Copyright (C) 2018-2023  Igara Studio S.A.
+// Copyright (C) 2018-2024  Igara Studio S.A.
 // Copyright (C) 2018  David Capello
 //
 // This program is distributed under the terms of
@@ -15,6 +15,7 @@
 #include "app/cmd/set_layer_tileset.h"
 #include "app/doc.h"
 #include "app/doc_api.h"
+#include "app/script/blend_mode.h"
 #include "app/script/docobj.h"
 #include "app/script/engine.h"
 #include "app/script/luacpp.h"
@@ -141,7 +142,9 @@ int Layer_get_blendMode(lua_State* L)
 {
   auto layer = get_docobj<Layer>(L, 1);
   if (layer->isImage()) {
-    lua_pushinteger(L, (int)static_cast<LayerImage*>(layer)->blendMode());
+    lua_pushinteger(
+      L, int(base::convert_to<app::script::BlendMode>(
+               static_cast<LayerImage*>(layer)->blendMode())));
     return 1;
   }
   else
@@ -247,7 +250,7 @@ int Layer_set_name(lua_State* L)
   auto layer = get_docobj<Layer>(L, 1);
   const char* name = lua_tostring(L, 2);
   if (name) {
-    Tx tx;
+    Tx tx(layer->sprite());
     tx(new cmd::SetLayerName(layer, name));
     tx.commit();
   }
@@ -259,7 +262,7 @@ int Layer_set_opacity(lua_State* L)
   auto layer = get_docobj<Layer>(L, 1);
   const int opacity = lua_tointeger(L, 2);
   if (layer->isImage()) {
-    Tx tx;
+    Tx tx(layer->sprite());
     tx(new cmd::SetLayerOpacity(static_cast<LayerImage*>(layer), opacity));
     tx.commit();
   }
@@ -269,11 +272,11 @@ int Layer_set_opacity(lua_State* L)
 int Layer_set_blendMode(lua_State* L)
 {
   auto layer = get_docobj<Layer>(L, 1);
-  const int blendMode = lua_tointeger(L, 2);
+  auto blendMode = app::script::BlendMode(lua_tointeger(L, 2));
   if (layer->isImage()) {
-    Tx tx;
+    Tx tx(layer->sprite());
     tx(new cmd::SetLayerBlendMode(static_cast<LayerImage*>(layer),
-                                  (doc::BlendMode)blendMode));
+                                  base::convert_to<doc::BlendMode>(blendMode)));
     tx.commit();
   }
   return 0;
@@ -310,7 +313,7 @@ int Layer_set_stackIndex(lua_State* L)
     return 0;
 
   Doc* doc = static_cast<Doc*>(layer->sprite()->document());
-  Tx tx;
+  Tx tx(doc);
   DocApi(doc, tx).restackLayerBefore(layer, parent, beforeThis);
   tx.commit();
   return 0;
@@ -326,7 +329,9 @@ int Layer_set_isEditable(lua_State* L)
 int Layer_set_isVisible(lua_State* L)
 {
   auto layer = get_docobj<Layer>(L, 1);
-  layer->setVisible(lua_toboolean(L, 2));
+  const bool newState = lua_toboolean(L, 2);
+  Doc* doc = static_cast<Doc*>(layer->sprite()->document());
+  doc->setLayerVisibilityWithNotifications(layer, newState);
   return 0;
 }
 
@@ -378,7 +383,7 @@ int Layer_set_parent(lua_State* L)
 
   if (parent) {
     Doc* doc = static_cast<Doc*>(layer->sprite()->document());
-    Tx tx;
+    Tx tx(doc);
     DocApi(doc, tx).restackLayerAfter(
       layer, parent, parent->lastLayer());
     tx.commit();
@@ -399,7 +404,7 @@ int Layer_set_tileset(lua_State* L)
       tsi = lua_tointeger(L, 2);
 
     if (tsi != tilemap->tilesetIndex()) {
-      Tx tx;
+      Tx tx(layer->sprite());
       tx(new cmd::SetLayerTileset(tilemap, tsi));
       tx.commit();
     }
